@@ -70,6 +70,7 @@ class GainsboroughTrilockLock : public lock::Lock,
                         const std::string &property_id, const std::string &ble_mac,
                         const std::string &client_id, const std::string &client_secret,
                         const std::string &endpoint, uint32_t update_interval_ms);
+  void set_cloud_update_interval_ms(uint32_t interval_ms) { this->cloud_update_interval_ms_ = interval_ms; }
 
  protected:
   void on_connected_();

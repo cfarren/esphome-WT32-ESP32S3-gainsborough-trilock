@@ -1,7 +1,5 @@
-# ESPHome config for ESP32-C3 (Gainsborough Trilock BLE bridge)
-# Uses WiFi + BLE with coexistence management.
-# The ESP32-C3 shares a single 2.4 GHz radio for both WiFi and BLE,
-# so careful tuning is required for stable operation.
+# Gainsborough Trilock BLE bridge — local BLE for lock/unlock/status,
+# cloud (Cognito) used only for periodic battery/door telemetry.
 
 substitutions:
   device_name: "gainsborough-trilock"
@@ -10,7 +8,7 @@ substitutions:
 esphome:
   name: "${device_name}"
   friendly_name: "${friendly_name}"
-  comment: "Gainsborough Freestyle Trilock BLE bridge on ESP32-C3 (WiFi+BLE)"
+  comment: "Gainsborough Freestyle Trilock BLE bridge on ESP32-S3 (WiFi+BLE)"
   on_boot:
     priority: 200
     then:
@@ -20,7 +18,8 @@ esphome:
       - logger.log: "WiFi connected, BLE coexistence is now active."
 
 esp32:
-  board: esp32-c3-devkitm-1
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
   framework:
     type: esp-idf
     sdkconfig_options:
@@ -49,26 +48,24 @@ wifi:
     password: !secret ota_password
 
 captive_portal:
-web_server:
-  port: 81
 
 api:
   encryption:
     key: !secret api_encryption_key
   reboot_timeout: 0s
-  services:
-    - service: sync_cloud_refresh
-      then:
-        - lambda: |-
-            id(trilock).sync_cloud_refresh();
 
 ota:
   - platform: esphome
     password: !secret ota_password
 
 logger:
-  level: INFO
-  baud_rate: 115200
+  level: DEBUG
+  hardware_uart: USB_SERIAL_JTAG   # native USB-C, no separate UART bridge chip
+  logs:
+    esp32_ble: DEBUG
+    esp32_ble_client: DEBUG
+    esp32_ble_tracker: DEBUG
+    gainsborough_trilock: DEBUG
 
 esp32_ble_tracker:
   id: esp32_ble_tracker_hub
@@ -88,6 +85,7 @@ ble_client:
       then:
         - logger.log: "Trilock BLE disconnected"
 
+# --- Lock entity: local BLE for lock/unlock/status, cloud only for battery (every 6h) ---
 lock:
   - platform: gainsborough_trilock
     id: trilock
@@ -102,7 +100,7 @@ lock:
       ble_mac: !secret freestyle_cloud_ble_mac
       client_id: !secret freestyle_client_id
       client_secret: !secret freestyle_client_secret
-      update_interval: 5min
+      update_interval: 6h
     icon: mdi:door-closed-lock
     lock_status_sensor:
       id: lock_status_text
@@ -114,9 +112,23 @@ lock:
     battery_low:
       name: "${friendly_name} Battery Low"
       id: battery_low
-    door_status:
-      name: "${friendly_name} Door Status"
-      id: door_status
+
+number:
+  - platform: template
+    name: "${friendly_name} - Cloud Battery Poll Interval (hours)"
+    id: cloud_poll_interval_hours
+    icon: mdi:timer-cog-outline
+    entity_category: config
+    min_value: 1
+    max_value: 24
+    step: 1
+    initial_value: 6
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        - lambda: |-
+            id(trilock).set_cloud_update_interval_ms((uint32_t)(x * 3600000.0f));
 
 button:
   - platform: template
@@ -161,42 +173,10 @@ binary_sensor:
     lambda: |-
       return id(trilock_ble).connected();
 
-i2c:
-  sda: 8
-  scl: 9
-  scan: true
-  id: bus_a
-
 sensor:
-  - platform: bmp280_i2c
-    address: 0x76
-    i2c_id: bus_a
-    temperature:
-      name: "Room Temperature"
-      id: "room_temp"
-      oversampling: 2x
-      filters:
-        - offset: -5.7
-        - throttle: 10s
-    pressure:
-      name: "Room Pressure"
-      id: "room_pressure"
-      oversampling: 16x
-      unit_of_measurement: "hPa"
-      accuracy_decimals: 2
-      filters:
-        - throttle: 10s
-    iir_filter: 16x
-    update_interval: 60s
-
   - platform: wifi_signal
     name: "${friendly_name} WiFi Signal"
     update_interval: 60s
-    entity_category: diagnostic
-
-  - platform: ble_rssi
-    mac_address: !secret trilock_ble_mac
-    name: "${friendly_name} BLE RSSI"
     entity_category: diagnostic
 
   - platform: uptime

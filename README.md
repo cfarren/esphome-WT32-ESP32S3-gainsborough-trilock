@@ -8,11 +8,11 @@ This project is based on the reverse-engineering work done by mcchas:
 ## Hardware Support
 
 - Original target: WT32-ETH01 (Ethernet + BLE)
-- Current target: ESP32-C3 (WiFi + BLE)
+- Current target: ESP32-S3 (WiFi + BLE)
 
 ## Files
 
-- `gainsborough_trilock_esp32c3.yaml`: ESPHome configuration for ESP32-C3.
+- `gainsborough_trilock_esp32s3.yaml`: ESPHome configuration for ESP32-S3.
 - `gainsborough_trilock/gainsborough_trilock/`: custom ESPHome component.
 - `secrets_template.yaml`: example secrets file. Copy this to `secrets.yaml`.
 - `tools/freestyle-gwasm-status.js`: optional local helper for inspecting cloud property/status data.
@@ -24,7 +24,7 @@ This project is based on the reverse-engineering work done by mcchas:
 3. Compile and flash:
 
    ```bash
-   esphome run gainsborough_trilock_esp32c3.yaml
+   esphome run gainsborough_trilock_esp32s3.yaml
    ```
 
 `secrets.yaml` is intentionally ignored by git. Do not commit real lock keys,
@@ -246,9 +246,9 @@ Typical workflow:
 These values are not personal account credentials, but they are still not
 committed here because they are vendor app credentials.
 
-## ESP32-C3 WiFi + BLE Coexistence Notes
+## ESP32-S3 WiFi + BLE Coexistence Notes
 
-The ESP32-C3 is a single-core RISC-V chip with a shared 2.4 GHz radio for both
+The ESP32-S3 is a single-core RISC-V chip with a shared 2.4 GHz radio for both
 WiFi and BLE. This requires careful configuration.
 
 ### Framework
@@ -258,7 +258,7 @@ time-sharing.
 
 ### BLE Scan Parameters
 
-The ESP32-C3 config uses a reduced scan window so WiFi is not starved while BLE
+The ESP32-S3 config uses a reduced scan window so WiFi is not starved while BLE
 is active.
 
 ### WiFi Power Save

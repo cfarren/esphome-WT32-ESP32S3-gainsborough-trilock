@@ -933,9 +933,11 @@ void GainsboroughTrilockLock::gattc_event_handler(esp_gattc_cb_event_t event, es
         auto service_uuid = esp32_ble::ESPBTUUID::from_raw(SERVICE_UUID);
         auto *service = base->get_service(service_uuid);
         if (service != nullptr) {
-            ESP_LOGI(TAG, "Service: %s", service->uuid.to_string().c_str());
+            char service_uuid_buf[37];
+            ESP_LOGI(TAG, "Service: %s", service->uuid.to_str(service_uuid_buf));
             for (auto *chr : service->characteristics) {
-                ESP_LOGI(TAG, "  Characteristic: %s (Handle: 0x%04x)", chr->uuid.to_string().c_str(), chr->handle);
+                char chr_uuid_buf[37];
+                ESP_LOGI(TAG, "  Characteristic: %s (Handle: 0x%04x)", chr->uuid.to_str(chr_uuid_buf), chr->handle);
             }
         } else {
             ESP_LOGW(TAG, "Service %s not found during discovery", SERVICE_UUID);
