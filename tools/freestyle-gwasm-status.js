@@ -318,6 +318,27 @@ async function cognitoLogin({ userPoolId, username, password, refreshToken, clie
   };
 }
 
+async function findProperty(requestedPropertyId, session) {
+  const propertyUrl = requestedPropertyId
+    ? `${API_ENDPOINT}/properties/${requestedPropertyId}`
+    : `${API_ENDPOINT}/properties`;
+  
+    if (requestedPropertyId) {
+      return await getJson(propertyUrl, session.idToken);
+    } else {
+      const propertiesResponse = await getJson(propertyUrl, session.idToken);
+      const property = Array.isArray(propertiesResponse) && propertiesResponse.length > 0
+        ? propertiesResponse[0]
+        : null;
+        
+      if (!property) {
+        throw new Error("No properties found for the authenticated user.");
+      }
+
+      return await findProperty(property.propertyId || property.id, session);
+    }
+}
+
 function findLock(propertiesResponse, requestedPropertyId, requestedBleMac) {
   const properties = Array.isArray(propertiesResponse)
     ? propertiesResponse
@@ -348,6 +369,14 @@ function normalizeMac(value) {
     .toUpperCase();
 }
 
+function formatMac(value) {
+  const parts = [];
+  for (let i = 0; i < value.length; i += 2) {
+    parts.push(value.slice(i, i + 2));
+  }
+  return parts.join(":").toLowerCase();
+}
+
 function printNonce(status) {
   if (!status || !status.doAiNonce) return;
 
@@ -362,23 +391,28 @@ function printNonce(status) {
   console.log(nonceBytes.map((value, index) => `b${index}: ${value}`).join("\n"));
 }
 
-function printRequiredSecrets({ session, propertyId, bleMac, clientId, clientSecret }) {
+function printRequiredSecrets({ session, property, lock, clientId, clientSecret }) {
   const redactClientSecret = process.env.FREESTYLE_REDACT_CLIENT_SECRET === "1";
-  const refreshToken = session.refreshToken || "";
+  const secretsYaml = `# Trilock details
+trilock_aes_key: "${property.keys.offlineKey}"
+trilock_ble_mac: "${formatMac(lock.bleMac)}"
+api_encryption_key: "<base64 32-byte key from EspHome>"
+ota_password: "<freestyle password>"
 
-  console.log("");
-  console.log("secrets.yaml values for ESPHome:");
-  console.log("```yaml");
-  if (refreshToken) {
-    console.log(`freestyle_refresh_token: "${refreshToken}"`);
-  } else {
-    console.log('freestyle_refresh_token: "<not returned by this auth flow; keep existing refresh token>"');
-  }
-  console.log(`freestyle_property_id: "${propertyId}"`);
-  console.log(`freestyle_cloud_ble_mac: "${bleMac}"`);
-  console.log(`freestyle_client_id: "${clientId}"`);
-  console.log(`freestyle_client_secret: "${redactClientSecret ? "<redacted>" : clientSecret}"`);
-  console.log("```");
+# Gainsborough/Freestyle cloud sync
+freestyle_refresh_token: "${session.refreshToken || '<not returned by this auth flow; keep existing refresh token>'}"
+freestyle_property_id: "${property.propertyId}"
+freestyle_cloud_ble_mac: "${lock.bleMac}"
+freestyle_client_id: "${clientId}"
+freestyle_client_secret: "${redactClientSecret ? '<redacted>' : clientSecret}"
+
+# WiFi credentials
+wifi_ssid: "<your wifi ssid>"
+wifi_password: "<your wifi password>"`;
+
+  const secretsFileName = "secrets.yaml";
+  fs.writeFileSync(secretsFileName, secretsYaml);
+  console.log(`Wrote ${secretsFileName}`);
 }
 
 async function main() {
@@ -418,28 +452,16 @@ async function main() {
     console.log(`refreshToken=${session.refreshToken}`);
   }
 
-  const propertyUrl = requestedPropertyId
-    ? `${API_ENDPOINT}/properties/${requestedPropertyId}`
-    : `${API_ENDPOINT}/properties`;
-  const propertiesResponse = await getJson(propertyUrl, session.idToken);
+  const propertiesResponse = await findProperty(requestedPropertyId, session);
   const { property, lock } = findLock(propertiesResponse, requestedPropertyId, requestedBleMac);
   if (!property || !lock) {
     throw new Error("Could not find a property/lock. Set FREESTYLE_PROPERTY_ID and FREESTYLE_BLE_MAC if needed.");
   }
 
-  const propertyId = property.propertyId || property.id;
-  const bleMac = lock.bleMac;
-
-  console.log(`propertyId=${propertyId}`);
-  console.log(`bleMac=${bleMac}`);
-  console.log(`doorClosed=${lock.doorClosed}`);
-  console.log(`batteryPercent=${lock.batteryPercent}`);
-  console.log(`batteryLow=${lock.batteryLow}`);
-
-  const statusUrl = `${API_ENDPOINT}/gwasm/${propertyId}/${bleMac}/status`;
+  const statusUrl = `${API_ENDPOINT}/gwasm/${property.propertyId}/${lock.bleMac}/status`;
   const status = await getJson(statusUrl, session.idToken);
   printNonce(status);
-  printRequiredSecrets({ session, propertyId, bleMac, clientId, clientSecret });
+  printRequiredSecrets({ session, property, lock, clientId, clientSecret });
 }
 
 main().catch((err) => {

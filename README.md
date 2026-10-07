@@ -19,9 +19,11 @@ This project is based on the reverse-engineering work done by mcchas:
 
 ## Setup
 
-1. Copy `secrets_template.yaml` to `secrets.yaml`.
-2. Fill in WiFi, ESPHome API/OTA, lock, and Freestyle cloud values.
-3. Compile and flash:
+1. Run `cp tools/freestyle-app-config.template.json tools/freestyle-app-config.json`.
+2. Enter freestyle `username` and `password` in the config.
+3. Run `node tools/freestyle-gwasm-status.js`.
+4. Fill in WiFi and ESPHome API/OTA values.
+5. Compile and flash:
 
    ```bash
    esphome run gainsborough_trilock_esp32s3.yaml
@@ -139,57 +141,6 @@ included as defaults because they are app-level constants from the Android app.
 You can override them with environment variables or a local ignored helper
 config if the app changes:
 
-```bash
-cp tools/freestyle-app-config.template.json tools/freestyle-app-config.json
-```
-
-You can put `username` and `password` in `tools/freestyle-app-config.json`, or
-pass them as environment variables:
-
-```bash
-FREESTYLE_USERNAME="you@example.com" \
-FREESTYLE_PASSWORD="your-password" \
-node tools/freestyle-gwasm-status.js
-```
-
-If you already have a refresh token, you can avoid sending the password:
-
-```bash
-FREESTYLE_REFRESH_TOKEN="<refresh token>" \
-node tools/freestyle-gwasm-status.js
-```
-
-Environment variables override `tools/freestyle-app-config.json` values when
-both are present.
-
-Username/password login uses the vendored reference implementation in
-`tools/freestyle-client` first. This is the same client used during reverse
-engineering. If that copy is missing, the helper checks `../external` and then
-falls back to its standalone Cognito `USER_SRP_AUTH` implementation. If
-authentication fails, rerun with auth debugging:
-
-```bash
-FREESTYLE_DEBUG_AUTH=1 node tools/freestyle-gwasm-status.js
-```
-
-Refresh-token login uses `REFRESH_TOKEN_AUTH`.
-
-To force the standalone implementation even when the reference client exists:
-
-```bash
-FREESTYLE_STANDALONE_AUTH=1 node tools/freestyle-gwasm-status.js
-```
-
-The script prints:
-
-- `propertyId`: use as `freestyle_property_id`
-- `bleMac`: use as `freestyle_cloud_ble_mac`
-- current cloud door/battery fields
-- current GWASM `doAiMsgId` and `doAiNonce`
-- a copy/paste `secrets.yaml` block for the ESPHome cloud fields
-
-The cloud BLE MAC is often formatted without colons. The component normalizes
-both forms.
 
 ### Refresh Token
 
