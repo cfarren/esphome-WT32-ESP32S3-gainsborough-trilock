@@ -618,6 +618,58 @@ void GainsboroughTrilockLock::set_cloud_config(const std::string &username, cons
                          !this->cloud_property_id_.empty() && !this->cloud_ble_mac_.empty();
 }
 
+void GainsboroughTrilockLock::update_cloud_enabled_() {
+  this->cloud_enabled_ = !this->cloud_refresh_token_.empty() &&
+                         !this->cloud_property_id_.empty() && !this->cloud_ble_mac_.empty();
+}
+
+void GainsboroughTrilockLock::set_cloud_refresh_token(const std::string &refresh_token) {
+  if (refresh_token.empty() || refresh_token == this->cloud_refresh_token_)
+    return;
+  ESP_LOGI(TAG, "Cloud refresh token updated at runtime");
+  this->cloud_refresh_token_ = refresh_token;
+  this->cloud_id_token_.clear();
+  this->cloud_token_expires_at_ = 0;
+  this->update_cloud_enabled_();
+}
+
+void GainsboroughTrilockLock::set_cloud_property_id(const std::string &property_id) {
+  if (property_id.empty() || property_id == this->cloud_property_id_)
+    return;
+  ESP_LOGI(TAG, "Cloud property ID updated at runtime: %s", property_id.c_str());
+  this->cloud_property_id_ = property_id;
+  this->cloud_id_token_.clear();
+  this->cloud_token_expires_at_ = 0;
+  this->update_cloud_enabled_();
+}
+
+void GainsboroughTrilockLock::set_cloud_client_id(const std::string &client_id) {
+  if (client_id.empty() || client_id == this->cloud_client_id_)
+    return;
+  ESP_LOGI(TAG, "Cloud client ID updated at runtime");
+  this->cloud_client_id_ = client_id;
+  this->cloud_id_token_.clear();
+  this->cloud_token_expires_at_ = 0;
+}
+
+void GainsboroughTrilockLock::set_cloud_client_secret(const std::string &client_secret) {
+  if (client_secret.empty() || client_secret == this->cloud_client_secret_)
+    return;
+  ESP_LOGI(TAG, "Cloud client secret updated at runtime");
+  this->cloud_client_secret_ = client_secret;
+  this->cloud_id_token_.clear();
+  this->cloud_token_expires_at_ = 0;
+}
+
+void GainsboroughTrilockLock::set_cloud_ble_mac(const std::string &ble_mac) {
+  std::string normalized = normalize_ble_mac(ble_mac);
+  if (normalized.empty() || normalized == this->cloud_ble_mac_)
+    return;
+  ESP_LOGI(TAG, "Cloud BLE MAC (for cloud telemetry matching) updated at runtime: %s", normalized.c_str());
+  this->cloud_ble_mac_ = normalized;
+  this->update_cloud_enabled_();
+}
+
 void GainsboroughTrilockLock::poll_cloud_if_due_() {
   if (!this->cloud_enabled_ || this->cloud_polling_)
     return;
@@ -1925,6 +1977,9 @@ void GainsboroughTrilockLock::decode_incoming_message_(const uint8_t *data, size
     pending_state_ = 0;
     status_pending_retry_ = false;
     this->publish_lock_state_((LockState) state_to_publish);
+    this->publish_door_status_(door);
+    if (battery > 0 && battery <= 100 && battery_level_sensor_ != nullptr)
+      battery_level_sensor_->publish_state(battery);
   } else {
     ESP_LOGW(TAG, "decode_message failed!");
   }
