@@ -1,0 +1,47 @@
+name: Build and OTA deploy ESPHome firmware
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "gainsborough_trilock_esp32s3.yaml"
+      - "gainsborough_trilock/**"
+  # Intentionally no `pull_request` trigger — a self-hosted runner must never
+  # execute code from an untrusted PR, since this runner has network access
+  # to your home LAN and the lock itself.
+
+  jobs:
+    build-and-deploy:
+      runs-on: [self-hosted, esphome]
+      steps:
+        - name: Checkout
+          uses: actions/checkout@4
+
+        - name: Set up Python
+          uses: actions/setup-python@v5
+          with:
+            python-version: "3.11"
+
+        - name: Install ESPHome
+          run: pip install --upgrade esphome
+
+        - name: Write secrets.yaml
+          run: |
+            cat > secrets.yml << EOF
+            trilock_aes_key: "${{ secrets.TRILOCK_AES_KEY }}"
+            trilock_ble_mac: "${{ secrets.TRILOCK_BLE_MAC }}"
+            api_encryption_key: "${{ secrets.API_ENCRYPTION_KEY }}"
+            ota_password: "${{ secrets.OTA_PASSWORD }}"
+            wifi_ssid: "${{ secrets.WIFI_SSID }}"
+            wifi_password: "${{ secrets.WIFI_PASSWORD }}"
+            EOF
+
+         - name: Compile firmware
+          run: esphome compile gainsborough_trilock_esp32s3.yaml
+
+          - name: OTA upload to lock bridge
+            run: esphome upload gainsborough_trilock_esp32s3.yaml --device ${{ vars.TRILOCK_DEVICE_IP }}
+
+          - name: Remove secrets.yaml
+            if: always()
+            run: rm -f secrets.yaml
