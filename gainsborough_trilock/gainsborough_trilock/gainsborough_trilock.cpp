@@ -3,7 +3,6 @@
 #include "esphome/components/esp32_ble/ble_uuid.h"
 #include "esphome/components/esp32_ble_client/ble_client_base.h"
 #include "esphome/components/esp32_ble_tracker/esp32_ble_tracker.h"
-#include "esphome/components/network/util.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 #include "mbedtls/base64.h"
@@ -13,10 +12,7 @@
 #include "mbedtls/gcm.h"
 #include "esp_gap_ble_api.h"
 #include "esp_gatt_defs.h"
-#include "esp_http_client.h"
 #include "esp_random.h"
-#include "esp_crt_bundle.h"
-#include "cJSON.h"
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -35,118 +31,6 @@ namespace gainsborough_trilock {
 static const char *const TAG = "gainsborough_trilock";
 
 namespace espbt = esphome::esp32_ble_tracker;
-
-struct HttpResponseBuffer {
-  std::string body;
-};
-
-static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
-  if (evt->event_id == HTTP_EVENT_ON_DATA && evt->user_data != nullptr && evt->data != nullptr && evt->data_len > 0) {
-    auto *response = static_cast<HttpResponseBuffer *>(evt->user_data);
-    response->body.append(static_cast<const char *>(evt->data), evt->data_len);
-  }
-  return ESP_OK;
-}
-
-static std::string json_escape(const std::string &value) {
-  std::string out;
-  out.reserve(value.size() + 8);
-  for (char c : value) {
-    switch (c) {
-      case '\\':
-        out += "\\\\";
-        break;
-      case '"':
-        out += "\\\"";
-        break;
-      case '\n':
-        out += "\\n";
-        break;
-      case '\r':
-        out += "\\r";
-        break;
-      case '\t':
-        out += "\\t";
-        break;
-      default:
-        out += c;
-        break;
-    }
-  }
-  return out;
-}
-
-static bool http_request(const std::string &url, const char *method, const std::string *body,
-                         const std::vector<std::pair<std::string, std::string>> &headers,
-                         std::string *response_body, int *status_code) {
-  HttpResponseBuffer response;
-  esp_http_client_config_t config{};
-  config.url = url.c_str();
-  config.event_handler = http_event_handler;
-  config.user_data = &response;
-  config.timeout_ms = 10000;
-  config.buffer_size = 4096;
-  config.buffer_size_tx = 2048;
-  config.crt_bundle_attach = esp_crt_bundle_attach;
-
-  esp_http_client_handle_t client = esp_http_client_init(&config);
-  if (client == nullptr)
-    return false;
-
-  esp_http_client_set_method(client, strcmp(method, "POST") == 0 ? HTTP_METHOD_POST : HTTP_METHOD_GET);
-  for (const auto &header : headers)
-    esp_http_client_set_header(client, header.first.c_str(), header.second.c_str());
-
-  if (body != nullptr) {
-    esp_http_client_set_post_field(client, body->c_str(), body->size());
-  }
-
-  esp_err_t err = esp_http_client_perform(client);
-  int code = esp_http_client_get_status_code(client);
-  esp_http_client_cleanup(client);
-
-  if (status_code != nullptr)
-    *status_code = code;
-  if (response_body != nullptr)
-    *response_body = response.body;
-  return err == ESP_OK && code >= 200 && code < 300;
-}
-
-static const char *json_get_string(cJSON *obj, const char *key) {
-  cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
-  return cJSON_IsString(item) ? item->valuestring : nullptr;
-}
-
-static bool json_get_int_(cJSON *obj, const char *key, int *value) {
-  cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
-  if (!cJSON_IsNumber(item))
-    return false;
-  *value = item->valueint;
-  return true;
-}
-
-static bool base64_encode_bytes_(const uint8_t *data, size_t len, std::string *out) {
-  size_t required = 0;
-  int ret = mbedtls_base64_encode(nullptr, 0, &required, data, len);
-  if (ret != MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL)
-    return false;
-  std::vector<uint8_t> encoded(required + 1);
-  ret = mbedtls_base64_encode(encoded.data(), encoded.size(), &required, data, len);
-  if (ret != 0)
-    return false;
-  out->assign(reinterpret_cast<const char *>(encoded.data()), required);
-  return true;
-}
-
-static std::string normalize_ble_mac(const std::string &mac) {
-  std::string out;
-  out.reserve(12);
-  for (char c : mac) {
-    if (std::isxdigit(static_cast<unsigned char>(c)))
-      out.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
-  }
-  return out;
-}
 
 static uint8_t reflect8(uint8_t v) {
   v = (uint8_t) ((v & 0xF0) >> 4) | (uint8_t) ((v & 0x0F) << 4);
@@ -539,8 +423,6 @@ void GainsboroughTrilockLock::setup() {
 }
 
 void GainsboroughTrilockLock::loop() {
-  this->poll_cloud_if_due_();
-
   if (this->parent() == nullptr || !this->parent()->connected())
     return;
 
@@ -556,7 +438,6 @@ void GainsboroughTrilockLock::loop() {
     this->handle_sync_notify_(sync_buf_, sync_len_);
   }
 
-  this->run_auto_sync_cloud_refresh_if_due_();
   this->run_auto_status_request_if_due_();
 
   if (sync_bootstrap_pending_ && gatt_ready_ && sync_char_handle_ != 0)
@@ -574,8 +455,6 @@ void GainsboroughTrilockLock::loop() {
     ESP_LOGW(TAG, "Sync diagnostics timeout; received %u/%u bytes",
              (unsigned) sync_doai_msg_received_, (unsigned) sync_doai_msg_len_);
     sync_diag_active_ = false;
-    sync_cloud_refresh_waiting_status_ = false;
-    sync_cloud_upload_after_receive_ = false;
     sync_bootstrap_active_ = false;
     sync_bootstrap_pending_ = false;
   }
@@ -592,134 +471,7 @@ void GainsboroughTrilockLock::dump_config() {
   LOG_LOCK(TAG, "Gainsborough Trilock Clean", this);
   ESP_LOGCONFIG(TAG, "  Service UUID: %s", SERVICE_UUID);
   ESP_LOGCONFIG(TAG, "  Characteristic UUID: %s", CMD_CHARACTERISTIC_UUID);
-  ESP_LOGCONFIG(TAG, "  Cloud polling: %s", this->cloud_enabled_ ? "enabled" : "disabled");
-  if (this->cloud_enabled_) {
-    ESP_LOGCONFIG(TAG, "  Cloud property: %s", this->cloud_property_id_.c_str());
-    ESP_LOGCONFIG(TAG, "  Cloud BLE MAC: %s", this->cloud_ble_mac_.c_str());
-    ESP_LOGCONFIG(TAG, "  Cloud update interval: %ums", (unsigned) this->cloud_update_interval_ms_);
-  }
-}
-
-void GainsboroughTrilockLock::set_cloud_config(const std::string &username, const std::string &refresh_token,
-                                               const std::string &property_id, const std::string &ble_mac,
-                                               const std::string &client_id, const std::string &client_secret,
-                                               const std::string &endpoint, uint32_t update_interval_ms) {
-  this->cloud_username_ = username;
-  this->cloud_refresh_token_ = refresh_token;
-  this->cloud_property_id_ = property_id;
-  this->cloud_ble_mac_ = normalize_ble_mac(ble_mac);
-  this->cloud_client_id_ = client_id;
-  this->cloud_client_secret_ = client_secret;
-  this->cloud_endpoint_ = endpoint;
-  while (!this->cloud_endpoint_.empty() && this->cloud_endpoint_.back() == '/')
-    this->cloud_endpoint_.pop_back();
-  this->cloud_update_interval_ms_ = std::max<uint32_t>(update_interval_ms, 60000);
-  this->cloud_enabled_ = !this->cloud_refresh_token_.empty() &&
-                         !this->cloud_property_id_.empty() && !this->cloud_ble_mac_.empty();
-}
-
-void GainsboroughTrilockLock::update_cloud_enabled_() {
-  this->cloud_enabled_ = !this->cloud_refresh_token_.empty() &&
-                         !this->cloud_property_id_.empty() && !this->cloud_ble_mac_.empty();
-}
-
-void GainsboroughTrilockLock::set_cloud_refresh_token(const std::string &refresh_token) {
-  if (refresh_token.empty() || refresh_token == this->cloud_refresh_token_)
-    return;
-  ESP_LOGI(TAG, "Cloud refresh token updated at runtime");
-  this->cloud_refresh_token_ = refresh_token;
-  this->cloud_id_token_.clear();
-  this->cloud_token_expires_at_ = 0;
-  this->update_cloud_enabled_();
-}
-
-void GainsboroughTrilockLock::set_cloud_property_id(const std::string &property_id) {
-  if (property_id.empty() || property_id == this->cloud_property_id_)
-    return;
-  ESP_LOGI(TAG, "Cloud property ID updated at runtime: %s", property_id.c_str());
-  this->cloud_property_id_ = property_id;
-  this->cloud_id_token_.clear();
-  this->cloud_token_expires_at_ = 0;
-  this->update_cloud_enabled_();
-}
-
-void GainsboroughTrilockLock::set_cloud_client_id(const std::string &client_id) {
-  if (client_id.empty() || client_id == this->cloud_client_id_)
-    return;
-  ESP_LOGI(TAG, "Cloud client ID updated at runtime");
-  this->cloud_client_id_ = client_id;
-  this->cloud_id_token_.clear();
-  this->cloud_token_expires_at_ = 0;
-}
-
-void GainsboroughTrilockLock::set_cloud_client_secret(const std::string &client_secret) {
-  if (client_secret.empty() || client_secret == this->cloud_client_secret_)
-    return;
-  ESP_LOGI(TAG, "Cloud client secret updated at runtime");
-  this->cloud_client_secret_ = client_secret;
-  this->cloud_id_token_.clear();
-  this->cloud_token_expires_at_ = 0;
-}
-
-void GainsboroughTrilockLock::set_cloud_ble_mac(const std::string &ble_mac) {
-  std::string normalized = normalize_ble_mac(ble_mac);
-  if (normalized.empty() || normalized == this->cloud_ble_mac_)
-    return;
-  ESP_LOGI(TAG, "Cloud BLE MAC (for cloud telemetry matching) updated at runtime: %s", normalized.c_str());
-  this->cloud_ble_mac_ = normalized;
-  this->update_cloud_enabled_();
-}
-
-void GainsboroughTrilockLock::poll_cloud_if_due_() {
-  if (!this->cloud_enabled_ || this->cloud_polling_)
-    return;
-  // Keep cloud/TLS work out of ESPHome's safe-mode rollback window.
-  if (millis() < 75000)
-    return;
-  if (!network::is_connected())
-    return;
-  const uint32_t now = millis();
-  if (this->last_cloud_poll_ != 0 && (now - this->last_cloud_poll_) < this->cloud_update_interval_ms_)
-    return;
-
-  this->cloud_polling_ = true;
-  bool success = false;
-  if (this->cloud_id_token_.empty() || (this->cloud_token_expires_at_ != 0 && now + 60000 > this->cloud_token_expires_at_)) {
-    if (!this->refresh_cloud_session_()) {
-      constexpr uint32_t RETRY_DELAY_MS = 30000;
-      this->last_cloud_poll_ = now - (this->cloud_update_interval_ms_ > RETRY_DELAY_MS
-                                      ? this->cloud_update_interval_ms_ - RETRY_DELAY_MS
-                                      : 0);
-      this->cloud_polling_ = false;
-      return;
-    }
-  }
-  if (!this->poll_cloud_lock_state_()) {
-    ESP_LOGW(TAG, "Cloud lock poll failed; forcing token refresh for next attempt");
-    this->cloud_id_token_.clear();
-    this->cloud_token_expires_at_ = 0;
-  } else {
-    success = true;
-  }
-  constexpr uint32_t RETRY_DELAY_MS = 30000;
-  this->last_cloud_poll_ = success ? now : now - (this->cloud_update_interval_ms_ > RETRY_DELAY_MS
-                                                 ? this->cloud_update_interval_ms_ - RETRY_DELAY_MS
-                                                 : 0);
-  this->cloud_polling_ = false;
-}
-
-void GainsboroughTrilockLock::run_auto_sync_cloud_refresh_if_due_() {
-  if (!this->cloud_enabled_ || !gatt_ready_ || sync_char_handle_ == 0)
-    return;
-  if (sync_diag_active_ || sync_cloud_refresh_waiting_status_ || protocol_active_ || sync_bootstrap_active_)
-    return;
-
-  const uint32_t now = millis();
-  if (last_sync_cloud_refresh_ != 0 && (now - last_sync_cloud_refresh_) < SYNC_CLOUD_REFRESH_INTERVAL_MS)
-    return;
-
-  last_sync_cloud_refresh_ = now;
-  this->start_sync_cloud_refresh_(false);
+  ESP_LOGCONFIG(TAG, "  Cloud connectivity: removed (fully local BLE)");
 }
 
 void GainsboroughTrilockLock::run_auto_status_request_if_due_() {
@@ -736,195 +488,6 @@ void GainsboroughTrilockLock::run_auto_status_request_if_due_() {
   this->start_status_request_(false);
 }
 
-bool GainsboroughTrilockLock::refresh_cloud_session_() {
-  ESP_LOGI(TAG, "Refreshing Gainsborough cloud session");
-  const std::string body =
-      std::string("{\"AuthFlow\":\"REFRESH_TOKEN_AUTH\",\"ClientId\":\"") + json_escape(this->cloud_client_id_) +
-      "\",\"AuthParameters\":{\"REFRESH_TOKEN\":\"" + json_escape(this->cloud_refresh_token_) +
-      "\",\"SECRET_HASH\":\"" + json_escape(this->cloud_client_secret_) + "\"},\"ClientMetadata\":{}}";
-
-  std::string response;
-  int status = 0;
-  const std::vector<std::pair<std::string, std::string>> headers = {
-      {"x-amz-target", "AWSCognitoIdentityProviderService.InitiateAuth"},
-      {"content-type", "application/x-amz-json-1.1"},
-  };
-  if (!http_request("https://cognito-idp.ap-southeast-2.amazonaws.com", "POST", &body, headers, &response, &status)) {
-    ESP_LOGW(TAG, "Cognito refresh failed: HTTP %d body=%s", status, response.c_str());
-    return false;
-  }
-
-  cJSON *root = cJSON_Parse(response.c_str());
-  if (root == nullptr) {
-    ESP_LOGW(TAG, "Cognito refresh returned invalid JSON");
-    return false;
-  }
-  cJSON *auth = cJSON_GetObjectItemCaseSensitive(root, "AuthenticationResult");
-  const char *id_token = auth != nullptr ? json_get_string(auth, "IdToken") : nullptr;
-  cJSON *expires = auth != nullptr ? cJSON_GetObjectItemCaseSensitive(auth, "ExpiresIn") : nullptr;
-  if (id_token == nullptr || !cJSON_IsNumber(expires)) {
-    ESP_LOGW(TAG, "Cognito refresh missing IdToken/ExpiresIn");
-    cJSON_Delete(root);
-    return false;
-  }
-  this->cloud_id_token_ = id_token;
-  const int expires_in = expires->valueint;
-  this->cloud_token_expires_at_ = millis() + (uint32_t) expires_in * 1000;
-  cJSON_Delete(root);
-  ESP_LOGI(TAG, "Gainsborough cloud session refreshed; expires in %ds", expires_in);
-  return true;
-}
-
-bool GainsboroughTrilockLock::ensure_cloud_session_() {
-  if (!this->cloud_enabled_) {
-    ESP_LOGW(TAG, "Gainsborough cloud is not configured");
-    return false;
-  }
-  if (this->cloud_id_token_.empty() ||
-      (this->cloud_token_expires_at_ != 0 && millis() + 60000 > this->cloud_token_expires_at_)) {
-    return this->refresh_cloud_session_();
-  }
-  return true;
-}
-
-bool GainsboroughTrilockLock::fetch_cloud_gwasm_status_() {
-  if (!this->ensure_cloud_session_())
-    return false;
-
-  const std::string url = this->cloud_endpoint_ + "/gwasm/" + this->cloud_property_id_ + "/" +
-                          this->cloud_ble_mac_ + "/status";
-  std::string response;
-  int status = 0;
-  const std::vector<std::pair<std::string, std::string>> headers = {
-      {"Authorization", this->cloud_id_token_},
-      {"User-Agent", "okhttp/4.9.3"},
-  };
-  if (!http_request(url, "GET", nullptr, headers, &response, &status)) {
-    ESP_LOGW(TAG, "GWASM status GET failed: HTTP %d body=%s", status, response.c_str());
-    return false;
-  }
-
-  cJSON *root = cJSON_Parse(response.c_str());
-  if (root == nullptr) {
-    ESP_LOGW(TAG, "GWASM status response was not JSON: %s", response.c_str());
-    return false;
-  }
-
-  int msg_id = 0;
-  const char *nonce_b64 = json_get_string(root, "doAiNonce");
-  if (!json_get_int_(root, "doAiMsgId", &msg_id) || msg_id <= 0 || msg_id > 65535 ||
-      nonce_b64 == nullptr || nonce_b64[0] == '\0') {
-    ESP_LOGW(TAG, "GWASM status missing valid doAiMsgId/doAiNonce: %s", response.c_str());
-    cJSON_Delete(root);
-    return false;
-  }
-
-  uint8_t nonce[12];
-  if (!decode_nonce_string_(nonce_b64, nonce)) {
-    ESP_LOGW(TAG, "GWASM status returned invalid doAiNonce for msgId=%d: %s", msg_id, nonce_b64);
-    cJSON_Delete(root);
-    return false;
-  }
-
-  cJSON *diao_cnt = cJSON_GetObjectItemCaseSensitive(root, "diAoMsgCnt");
-  ESP_LOGI(TAG, "GWASM status: doAiMsgId=%d diAoMsgCnt=%d",
-           msg_id, cJSON_IsNumber(diao_cnt) ? diao_cnt->valueint : -1);
-  this->set_cloud_doai_nonce_((uint16_t) msg_id, nonce);
-  cJSON_Delete(root);
-  return true;
-}
-
-bool GainsboroughTrilockLock::post_cloud_doai_message_(uint16_t msg_id, const uint8_t *payload, size_t len) {
-  if (msg_id == 0 || payload == nullptr || len == 0) {
-    ESP_LOGW(TAG, "Cannot post GWASM DoAi message: invalid msgId/payload");
-    return false;
-  }
-  if (!this->ensure_cloud_session_())
-    return false;
-
-  std::string payload_b64;
-  if (!base64_encode_bytes_(payload, len, &payload_b64)) {
-    ESP_LOGW(TAG, "Failed to base64 encode Sync DoAi payload for cloud upload");
-    return false;
-  }
-
-  const std::string url = this->cloud_endpoint_ + "/gwasm/" + this->cloud_property_id_ + "/" +
-                          this->cloud_ble_mac_ + "/message";
-  const std::string body = std::string("{\"doAiMsgId\":") + std::to_string(msg_id) +
-                           ",\"doAiMsg\":\"" + json_escape(payload_b64) + "\"}";
-  std::string response;
-  int status = 0;
-  const std::vector<std::pair<std::string, std::string>> headers = {
-      {"Authorization", this->cloud_id_token_},
-      {"User-Agent", "okhttp/4.9.3"},
-      {"Content-Type", "application/json"},
-  };
-  ESP_LOGI(TAG, "Posting Sync DoAi payload to cloud: msgId=%u len=%u",
-           msg_id, (unsigned) len);
-  if (!http_request(url, "POST", &body, headers, &response, &status)) {
-    ESP_LOGW(TAG, "GWASM DoAi POST failed: HTTP %d body=%s", status, response.c_str());
-    return false;
-  }
-  ESP_LOGI(TAG, "GWASM DoAi POST succeeded: HTTP %d", status);
-  return true;
-}
-
-bool GainsboroughTrilockLock::poll_cloud_lock_state_() {
-  const std::string url = this->cloud_endpoint_ + "/properties/" + this->cloud_property_id_;
-  std::string response;
-  int status = 0;
-  const std::vector<std::pair<std::string, std::string>> headers = {
-      {"authorization", this->cloud_id_token_},
-      {"user-agent", "okhttp/4.9.3"},
-  };
-  if (!http_request(url, "GET", nullptr, headers, &response, &status)) {
-    ESP_LOGW(TAG, "Gainsborough property GET failed: HTTP %d body=%s", status, response.c_str());
-    return false;
-  }
-
-  cJSON *root = cJSON_Parse(response.c_str());
-  if (root == nullptr) {
-    ESP_LOGW(TAG, "Gainsborough property response was not JSON");
-    return false;
-  }
-  cJSON *locks = cJSON_GetObjectItemCaseSensitive(root, "locks");
-  if (!cJSON_IsArray(locks)) {
-    ESP_LOGW(TAG, "Gainsborough property response did not contain locks[]");
-    cJSON_Delete(root);
-    return false;
-  }
-
-  bool found = false;
-  cJSON *lock = nullptr;
-  cJSON_ArrayForEach(lock, locks) {
-    const char *ble_mac = json_get_string(lock, "bleMac");
-    if (ble_mac == nullptr)
-      continue;
-    if (normalize_ble_mac(ble_mac) != this->cloud_ble_mac_)
-      continue;
-
-    cJSON *door_closed = cJSON_GetObjectItemCaseSensitive(lock, "doorClosed");
-    cJSON *battery_low = cJSON_GetObjectItemCaseSensitive(lock, "batteryLow");
-    cJSON *battery_percent = cJSON_GetObjectItemCaseSensitive(lock, "batteryPercent");
-    if (cJSON_IsBool(door_closed))
-      this->publish_door_status_(cJSON_IsTrue(door_closed));
-    if (cJSON_IsBool(battery_low) && cJSON_IsNumber(battery_percent))
-      this->publish_battery_info_(cJSON_IsTrue(battery_low), battery_percent->valueint);
-    ESP_LOGI(TAG, "Cloud telemetry: doorClosed=%s batteryLow=%s batteryPercent=%d",
-             cJSON_IsTrue(door_closed) ? "true" : "false",
-             cJSON_IsTrue(battery_low) ? "true" : "false",
-             cJSON_IsNumber(battery_percent) ? battery_percent->valueint : -1);
-    found = true;
-    break;
-  }
-
-  cJSON_Delete(root);
-  if (!found) {
-    ESP_LOGW(TAG, "No cloud lock matched BLE MAC %s", this->cloud_ble_mac_.c_str());
-    return false;
-  }
-  return true;
-}
 
 void GainsboroughTrilockLock::control(const lock::LockCall &call) {
   auto opt = call.get_state();
@@ -1327,27 +890,6 @@ void GainsboroughTrilockLock::handle_sync_notify_(const uint8_t *data, size_t le
     ESP_LOGI(TAG, "Sync DoAi status: flags=0x%02X[@1] transferId=%u[@2..3] msgLen=%u[@4..5] msgCount=%u[@10] msgId=%u[@11..12] crc=%02X%02X%02X%02X[@6..9]",
              flags, transfer_id, msg_len, msg_count, msg_id, data[6], data[7], data[8], data[9]);
 
-    if (sync_cloud_refresh_waiting_status_ && sync_doai_msg_id_ == 0) {
-      if (msg_count == 0 || msg_id == 0) {
-        ESP_LOGW(TAG, "Sync cloud refresh found no BLE DoAi message to transfer: msgCount=%u msgId=%u",
-                 msg_count, msg_id);
-        sync_cloud_refresh_waiting_status_ = false;
-        sync_diag_active_ = false;
-        return;
-      }
-      sync_cloud_refresh_waiting_status_ = false;
-      ESP_LOGI(TAG, "Sync cloud refresh selected BLE msgId=%u; fetching cloud nonce", msg_id);
-      if (!this->fetch_cloud_gwasm_status_()) {
-        sync_diag_active_ = false;
-        return;
-      }
-      sync_cloud_upload_after_receive_ = true;
-      ESP_LOGI(TAG, "Sync cloud refresh starting transfer: bleMsgId=%u cloudStatusMsgId=%u",
-               msg_id, current_doai_msg_id_);
-      this->start_sync_doai_transfer_with_nonce_(msg_id, msg_len, current_doai_nonce_, "cloudDoAiNonce");
-      return;
-    }
-
     if (sync_diag_active_) {
       if (transfer_id != 0 && transfer_id == sync_doai_msg_id_ && msg_len > 0) {
         sync_doai_msg_len_ = msg_len;
@@ -1455,20 +997,6 @@ void GainsboroughTrilockLock::decode_sync_doai_message_() {
 
   ESP_LOGI(TAG, "Sync DoAi payload assembled: msgId=%u len=%u",
            sync_doai_msg_id_, (unsigned) total_len);
-  if (sync_cloud_upload_after_receive_) {
-    sync_cloud_upload_after_receive_ = false;
-    if (this->post_cloud_doai_message_(sync_doai_msg_id_, sync_doai_msg_, total_len)) {
-      ESP_LOGI(TAG, "Polling cloud property state after GWASM DoAi upload");
-      this->poll_cloud_lock_state_();
-      this->set_timeout("gwasm_poll_after_post", 2500, [this]() {
-        ESP_LOGI(TAG, "Polling cloud property state after GWASM processing delay");
-        this->poll_cloud_lock_state_();
-      });
-      sync_diag_active_ = false;
-      sync_bootstrap_active_ = false;
-      return;
-    }
-  }
 
   if (!current_doai_nonce_valid_ || current_doai_msg_id_ != sync_doai_msg_id_) {
     ESP_LOGW(TAG, "Refusing Sync DoAi decrypt for msgId=%u: matching cloud doAiNonce is not available",
@@ -2129,46 +1657,11 @@ void GainsboroughTrilockLock::sync_set_cloud_nonce(float msg_id, float b0, float
 }
 
 void GainsboroughTrilockLock::sync_cloud_refresh() {
-  this->start_sync_cloud_refresh_(true);
-}
-
-void GainsboroughTrilockLock::start_sync_cloud_refresh_(bool manual) {
-  if (this->parent() == nullptr || !this->parent()->connected()) {
-    if (manual)
-      ESP_LOGW(TAG, "Cannot run Sync cloud refresh: BLE is not connected");
-    return;
-  }
-  if (!gatt_ready_ || sync_char_handle_ == 0) {
-    if (manual)
-      ESP_LOGW(TAG, "Cannot run Sync cloud refresh: Sync characteristic not ready");
-    return;
-  }
-  if (sync_diag_active_ || sync_cloud_refresh_waiting_status_) {
-    if (manual)
-      ESP_LOGW(TAG, "Cannot run Sync cloud refresh: another sync is already active");
-    return;
-  }
-  ESP_LOGI(TAG, "Starting Sync cloud refresh%s", manual ? "" : " (auto)");
-  this->reset_sync_diagnostics_state_();
-  sync_cloud_refresh_waiting_status_ = true;
-  sync_cloud_upload_after_receive_ = false;
-
-  uint8_t status_req[1] = {0x01};
-  this->write_sync_(status_req, sizeof(status_req));
+  ESP_LOGW(TAG, "sync_cloud_refresh() is a no-op: cloud connectivity has been removed from this build");
 }
 
 void GainsboroughTrilockLock::sync_upload_last_doai_payload() {
-  if (sync_doai_msg_id_ == 0 || sync_doai_msg_received_ == 0) {
-    ESP_LOGW(TAG, "No assembled Sync DoAi payload is available to upload");
-    return;
-  }
-  size_t len = sync_doai_msg_len_ != 0 && sync_doai_msg_len_ <= sync_doai_msg_received_
-                   ? sync_doai_msg_len_
-                   : sync_doai_msg_received_;
-  if (this->post_cloud_doai_message_(sync_doai_msg_id_, sync_doai_msg_, len)) {
-    ESP_LOGI(TAG, "Polling cloud property state after manual GWASM DoAi upload");
-    this->poll_cloud_lock_state_();
-  }
+  ESP_LOGW(TAG, "sync_upload_last_doai_payload() is a no-op: cloud connectivity has been removed from this build");
 }
 
 void GainsboroughTrilockLock::sync_force_current_nonce_transfer(float target_msg_id) {

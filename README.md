@@ -1,6 +1,8 @@
 # ESPHome Gainsborough Freestyle Trilock BLE Bridge
 
-This project provides an ESPHome component to bridge Gainsborough Freestyle Trilock BLE locks to Home Assistant.
+This project provides an ESPHome component to bridge Gainsborough Freestyle
+Trilock BLE locks to Home Assistant — entirely over local BLE, with
+**no dependency on Gainsborough's Freestyle cloud service**.
 
 This project is based on the reverse-engineering work done by mcchas:
 [ble-freestyle-client](https://github.com/mcchas/ble-freestyle-client).
@@ -15,22 +17,24 @@ This project is based on the reverse-engineering work done by mcchas:
 - `gainsborough_trilock_esp32s3.yaml`: ESPHome configuration for ESP32-S3.
 - `gainsborough_trilock/gainsborough_trilock/`: custom ESPHome component.
 - `secrets_template.yaml`: example secrets file. Copy this to `secrets.yaml`.
-- `tools/freestyle-gwasm-status.js`: optional local helper for inspecting cloud property/status data.
+
+The `tools/freestyle-gwasm-status.js` helper and `tools/freestyle-app-config.json`
+are no longer needed and can be deleted — they existed only to pull Cognito
+refresh tokens and property/BLE-MAC values out of the Freestyle cloud account,
+which this project no longer talks to at all.
 
 ## Setup
 
-1. Run `cp tools/freestyle-app-config.template.json tools/freestyle-app-config.json`.
-2. Enter freestyle `username` and `password` in the config.
-3. Run `node tools/freestyle-gwasm-status.js`.
-4. Fill in WiFi and ESPHome API/OTA values.
-5. Compile and flash:
+1. Fill in WiFi, ESPHome API/OTA values, and your lock's AES key + BLE MAC in
+   `secrets.yaml` (see below).
+2. Compile and flash:
 
    ```bash
    esphome run gainsborough_trilock_esp32s3.yaml
    ```
 
-`secrets.yaml` is intentionally ignored by git. Do not commit real lock keys,
-refresh tokens, property IDs, BLE MAC addresses, or app client secrets.
+`secrets.yaml` is intentionally ignored by git. Do not commit your lock's AES
+key or BLE MAC address.
 
 Required secrets:
 
@@ -40,162 +44,56 @@ trilock_ble_mac: "aa:bb:cc:dd:ee:ff"
 api_encryption_key: "<ESPHome API key>"
 ota_password: "<ESPHome OTA password>"
 
-freestyle_refresh_token: "<Cognito refresh token>"
-freestyle_property_id: "<Freestyle property UUID>"
-freestyle_cloud_ble_mac: "<lock BLE MAC as known by cloud>"
-freestyle_client_id: "<Cognito app client id>"
-freestyle_client_secret: "<Cognito app client secret>"
-
 wifi_ssid: "<ssid>"
 wifi_password: "<password>"
 ```
+
+That's the complete list — there are no Freestyle/Cognito cloud secrets
+(`freestyle_refresh_token`, `freestyle_property_id`, `freestyle_cloud_ble_mac`,
+`freestyle_client_id`, `freestyle_client_secret`) to obtain or store anymore.
+
+The AES key is also editable at runtime from Home Assistant (the
+"`<friendly_name>` - AES Key Override" text entity) without recompiling —
+see "Runtime-Editable Settings" below.
 
 ## How It Works
 
 The lock exposes two useful BLE channels:
 
-- Command channel: normal encrypted lock/status protocol.
-- Sync channel: DoAi/DiAo sync transport used by the official phone app and
-  Gainsborough cloud service.
+- **Command channel**: the normal encrypted lock/status protocol.
+- **Sync channel**: the DoAi/DiAo transport the official phone app used to
+  coordinate with Gainsborough's cloud. This component no longer uses it for
+  that purpose (see below).
 
-The ESPHome component keeps the normal BLE lock protocol in place for direct
-status requests, then also emulates the important part of the official phone
-sync flow so cloud telemetry can be refreshed without the phone being connected.
+The ESPHome component uses the command channel for everything: locking,
+unlocking, and status reporting. The lock's own status reply (decrypted
+locally with your AES key) includes lock state, door-closed status, and
+battery percentage — no cloud round-trip involved anywhere in that path.
 
 ### Periodic Refresh
 
-Every minute, when BLE is connected and no other lock/sync command is active,
-the component runs:
+Every minute, when BLE is connected and no other command is active, the
+component sends a status request over the command channel. The decoded
+response updates the lock state, door sensor, and battery sensor in Home
+Assistant directly from the lock itself.
 
-1. A normal lock status request over the command channel.
-2. A cloud sync refresh over the sync channel.
+### Sync Channel / Diagnostics (local-only, optional)
 
-Both paths are guarded so they skip themselves if another BLE command, sync
-transfer, or bootstrap operation is already in progress.
+The lower-level Sync-channel machinery (DoAi/DiAo transfer, phone-like
+bootstrap, manual nonce injection) is still present in the component for BLE
+protocol debugging, but it is fully local now — it never reaches out to any
+Gainsborough server. The two functions that previously uploaded data to the
+cloud (`sync_cloud_refresh`, `sync_upload_last_doai_payload`) are no-ops that
+just log a warning if called; nothing in this component makes an outbound
+HTTP/TLS request of any kind.
 
-### Sync Cloud Refresh Flow
+## Runtime-Editable Settings
 
-The cloud refresh flow mirrors the successful phone/app behavior:
-
-1. ESPHome writes `01` to the sync characteristic to ask the lock for current
-   DoAi sync status.
-2. The lock returns a type `0x01` status notification containing:
-   - `msgCount`
-   - BLE-side `msgId`
-   - expected message length when a transfer is active
-3. ESPHome refreshes its Cognito ID token if needed using the configured
-   `freestyle_refresh_token`, `freestyle_client_id`, and
-   `freestyle_client_secret`.
-4. ESPHome calls:
-
-   ```text
-   GET /v0/gwasm/{propertyId}/{bleMac}/status
-   ```
-
-   The cloud response includes `doAiMsgId` and `doAiNonce`.
-5. ESPHome starts a BLE DoAi transfer using the cloud nonce:
-
-   ```text
-   10 <msgId little-endian> 00 00 <12-byte doAiNonce>
-   ```
-
-6. The lock replies with type `0x30` fragments. ESPHome assembles the encrypted
-   raw DoAi payload.
-7. ESPHome uploads the assembled payload to:
-
-   ```text
-   POST /v0/gwasm/{propertyId}/{bleMac}/message
-   {
-     "doAiMsgId": <msgId>,
-     "doAiMsg": "<base64 raw payload>"
-   }
-   ```
-
-8. The cloud validates/decrypts/processes the payload, then ESPHome polls:
-
-   ```text
-   GET /v0/properties/{propertyId}
-   ```
-
-   The component publishes the resulting door and battery telemetry to Home
-   Assistant.
-
-The component does not delete or acknowledge sync messages as part of this
-diagnostic/cloud-refresh path.
-
-## Obtaining Freestyle Cloud Values
-
-These values come from the official Freestyle/Gainsborough mobile app protocol.
-Use only your own account and lock.
-
-### Property ID and Cloud BLE MAC
-
-The property ID and lock BLE MAC are returned by the authenticated cloud
-property response used by the phone app. The helper script can print them after
-logging in with your Freestyle account. It is self-contained and only requires
-Node.js 18 or newer.
-
-The helper does not read `secrets.yaml`; it generates values for it. The
-Freestyle app Cognito user pool, client id, client secret, and API endpoint are
-included as defaults because they are app-level constants from the Android app.
-You can override them with environment variables or a local ignored helper
-config if the app changes:
-
-
-### Refresh Token
-
-The refresh token is issued by AWS Cognito after the official app login flow.
-There are three practical ways to obtain it:
-
-- Use a local Freestyle client/helper that performs the same Cognito login and
-  exposes the session refresh token.
-- Inspect an authenticated session from the official Android app on your own
-  device.
-- Capture your own app login traffic with a trusted local TLS debugging setup.
-
-The included `tools/freestyle-gwasm-status.js` prints the refresh token in the
-final `secrets.yaml` block when Cognito returns one. Username/password login
-usually returns a refresh token. Refresh-token auth usually reuses the existing
-refresh token instead of returning a new one.
-
-For one-line output compatibility, you can also print `refreshToken=...`:
-
-```bash
-FREESTYLE_USERNAME="you@example.com" \
-FREESTYLE_PASSWORD="your-password" \
-FREESTYLE_PRINT_REFRESH_TOKEN=1 \
-node tools/freestyle-gwasm-status.js
-```
-
-Store the printed value only in `secrets.yaml` as
-`freestyle_refresh_token`.
-
-The final `secrets.yaml` block prints `freestyle_client_secret` because the
-script is generating the ESPHome secret values. To redact it in terminal output:
-
-```bash
-FREESTYLE_REDACT_CLIENT_SECRET=1 node tools/freestyle-gwasm-status.js
-```
-
-### Client ID and Client Secret
-
-The mobile app uses a Cognito app client ID and client secret when refreshing
-tokens. They can be identified from the official Android APK by decompiling the
-app and searching for the Cognito configuration, auth constants, or
-`InitiateAuth` request construction.
-
-Typical workflow:
-
-1. Decompile the APK with a Java/Kotlin decompiler such as jadx.
-2. Search for strings such as `ClientId`, `SECRET_HASH`,
-   `REFRESH_TOKEN_AUTH`, `cognito-idp.ap-southeast-2.amazonaws.com`, or the
-   Gainsborough API endpoint.
-3. Put the discovered values in `secrets.yaml` as:
-   - `freestyle_client_id`
-   - `freestyle_client_secret`
-
-These values are not personal account credentials, but they are still not
-committed here because they are vendor app credentials.
+The AES key can be changed from Home Assistant at any time — the
+"`<friendly_name>` - AES Key Override" text entity — without a recompile or
+reflash. This is useful if you ever need to update the key (e.g. after
+re-extracting it from a re-paired lock). The new value is stored in flash and
+survives reboots and OTA updates.
 
 ## ESP32-S3 WiFi + BLE Coexistence Notes
 
@@ -243,9 +141,11 @@ Before publishing:
 2. Search tracked files for accidental secrets:
 
    ```bash
-   git grep -n -E "refresh_token|IdToken|Authorization|property_id|client_secret"
+   git grep -n -E "aes_key|ble_mac"
    ```
 
-3. Do not publish old git history that previously contained real tokens or
-   IDs. Start from a clean sanitized repository or rewrite history before
-   pushing publicly.
+3. If this repository's history predates the cloud removal, it may still
+   contain old Freestyle refresh tokens, property IDs, or Cognito client
+   secrets from earlier commits. Do not publish that history as-is — start
+   from a clean sanitized repository or rewrite history before pushing
+   publicly.

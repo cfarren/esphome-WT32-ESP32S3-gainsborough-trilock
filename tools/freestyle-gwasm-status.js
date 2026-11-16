@@ -1,4 +1,15 @@
 #!/usr/bin/env node
+//
+// Logs into the Gainsborough Freestyle cloud account once, finds the lock,
+// and pulls out the two values the ESPHome firmware actually needs locally:
+// trilock_aes_key (property.keys.offlineKey) and trilock_ble_mac.
+//
+// The firmware itself no longer talks to this cloud service at all — this
+// script is just a convenient one-off way to extract a lock's AES key
+// (e.g. for a replacement lock) without decompiling the Android app.
+// It no longer writes any freestyle_*/Cognito fields into secrets.yaml,
+// and no longer fetches the DoAi sync nonce (that was only ever used by
+// the cloud-sync BLE bridging code, which has been removed).
 
 const crypto = require("crypto");
 const fs = require("fs");
@@ -377,42 +388,32 @@ function formatMac(value) {
   return parts.join(":").toLowerCase();
 }
 
-function printNonce(status) {
-  if (!status || !status.doAiNonce) return;
-
-  const nonceBytes = Array.from(Buffer.from(status.doAiNonce, "base64"));
-  console.log("");
-  console.log("GWASM status:");
-  console.log(JSON.stringify(status, null, 2));
-  console.log("");
-  console.log("Nonce bytes:");
-  console.log(`msg_id: ${status.doAiMsgId}`);
-  console.log(`nonce: ${status.doAiNonce}`);
-  console.log(nonceBytes.map((value, index) => `b${index}: ${value}`).join("\n"));
-}
-
-function printRequiredSecrets({ session, property, lock, clientId, clientSecret }) {
-  const redactClientSecret = process.env.FREESTYLE_REDACT_CLIENT_SECRET === "1";
-  const secretsYaml = `# Trilock details
-trilock_aes_key: "${property.keys.offlineKey}"
+function printRequiredSecrets({ property, lock }) {
+  // Only the two values the firmware actually needs locally. Written to a
+  // separate file (not secrets.yaml) so this never clobbers the WiFi/OTA/API
+  // values and any other secrets you already have in your real secrets.yaml
+  // — copy these lines in by hand. ota_encryption_key is freshly generated
+  // each run (same format ESPHome/openssl expects: 32 random bytes, base64)
+  // — if your secrets.yaml already has one you want to keep using, ignore
+  // this line rather than overwriting a key your device has already paired
+  // OTA encryption with.
+  const snippet = `trilock_aes_key: "${property.keys.offlineKey}"
 trilock_ble_mac: "${formatMac(lock.bleMac)}"
-api_encryption_key: "<base64 32-byte key from EspHome>"
+api_encryption_key: "<encryption key from ESPHOME>"
 ota_password: "<freestyle password>"
-
-# Gainsborough/Freestyle cloud sync
-freestyle_refresh_token: "${session.refreshToken || '<not returned by this auth flow; keep existing refresh token>'}"
-freestyle_property_id: "${property.propertyId}"
-freestyle_cloud_ble_mac: "${lock.bleMac}"
-freestyle_client_id: "${clientId}"
-freestyle_client_secret: "${redactClientSecret ? '<redacted>' : clientSecret}"
 
 # WiFi credentials
 wifi_ssid: "<your wifi ssid>"
 wifi_password: "<your wifi password>"`;
 
-  const secretsFileName = "secrets.yaml";
-  fs.writeFileSync(secretsFileName, secretsYaml);
-  console.log(`Wrote ${secretsFileName}`);
+  const outFileName = "secrets.yaml";
+  fs.writeFileSync(outFileName, snippet + "\n");
+  console.log(`Wrote ${outFileName} — merge these lines into your secrets.yaml:`);
+  console.log("");
+  console.log(snippet);
+  console.log("");
+  console.log("Note: only copy in ota_encryption_key if you don't already have one set —");
+  console.log("generating a new one means the device won't accept OTA until reflashed with it.");
 }
 
 async function main() {
@@ -458,10 +459,7 @@ async function main() {
     throw new Error("Could not find a property/lock. Set FREESTYLE_PROPERTY_ID and FREESTYLE_BLE_MAC if needed.");
   }
 
-  const statusUrl = `${API_ENDPOINT}/gwasm/${property.propertyId}/${lock.bleMac}/status`;
-  const status = await getJson(statusUrl, session.idToken);
-  printNonce(status);
-  printRequiredSecrets({ session, property, lock, clientId, clientSecret });
+  printRequiredSecrets({ property, lock });
 }
 
 main().catch((err) => {

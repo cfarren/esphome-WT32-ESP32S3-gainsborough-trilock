@@ -66,11 +66,6 @@ class GainsboroughTrilockLock : public lock::Lock,
   void set_battery_low_binary_sensor(binary_sensor::BinarySensor *sensor) { battery_low_binary_sensor_ = sensor; }
   void set_door_status_binary_sensor(binary_sensor::BinarySensor *sensor) { door_status_binary_sensor_ = sensor; }
   void set_target_state(uint8_t state);
-  void set_cloud_config(const std::string &username, const std::string &refresh_token,
-                        const std::string &property_id, const std::string &ble_mac,
-                        const std::string &client_id, const std::string &client_secret,
-                        const std::string &endpoint, uint32_t update_interval_ms);
-  void set_cloud_update_interval_ms(uint32_t interval_ms) { this->cloud_update_interval_ms_ = interval_ms; }
 
  protected:
   void on_connected_();
@@ -117,14 +112,6 @@ class GainsboroughTrilockLock : public lock::Lock,
   bool parse_nonce_bytes_(const float *values, bool allow_absent);
   void log_sync_debug_packet_(const char *dir, uint16_t handle, const char *uuid, const char *mode,
                               const uint8_t *data, size_t len);
-  void poll_cloud_if_due_();
-  void run_auto_sync_cloud_refresh_if_due_();
-  void start_sync_cloud_refresh_(bool manual);
-  bool ensure_cloud_session_();
-  bool refresh_cloud_session_();
-  bool fetch_cloud_gwasm_status_();
-  bool post_cloud_doai_message_(uint16_t msg_id, const uint8_t *payload, size_t len);
-  bool poll_cloud_lock_state_();
   void run_auto_status_request_if_due_();
   void start_status_request_(bool manual);
 
@@ -209,21 +196,8 @@ class GainsboroughTrilockLock : public lock::Lock,
   bool sync_bootstrap_has_nonce_{false};
   uint8_t sync_bootstrap_nonce_[12]{};
 
-  bool cloud_enabled_{false};
-  bool cloud_polling_{false};
-  std::string cloud_username_;
-  std::string cloud_refresh_token_;
-  std::string cloud_property_id_;
-  std::string cloud_ble_mac_;
-  std::string cloud_client_id_;
-  std::string cloud_client_secret_;
-  std::string cloud_endpoint_;
-  std::string cloud_id_token_;
-  uint32_t cloud_update_interval_ms_{300000};
-  uint32_t last_cloud_poll_{0};
-  uint32_t cloud_token_expires_at_{0};
-  uint32_t last_sync_cloud_refresh_{0};
-  static constexpr uint32_t SYNC_CLOUD_REFRESH_INTERVAL_MS = 60000;
+  // Retained as permanently-false guards used by the local Sync-diagnostics state machine;
+  // nothing sets them true anymore now that cloud connectivity has been removed.
   bool sync_cloud_upload_after_receive_{false};
   bool sync_cloud_refresh_waiting_status_{false};
 
