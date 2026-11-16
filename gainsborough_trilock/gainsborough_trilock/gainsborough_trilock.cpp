@@ -1491,23 +1491,27 @@ void GainsboroughTrilockLock::decode_incoming_message_(const uint8_t *data, size
   if (decode_message(aes_key_, data + 23, enc_len, dec, sender_nonce_, rx_nonce)) {
     ESP_LOGD(TAG, "Decrypted Status Payload (len %u): %s", (unsigned)enc_len, format_hex_pretty(dec, enc_len).c_str());
     
+    // NOTE: the status reply only ever carries two real fields in practice:
+    // field 1 (desired state) and field 2 (reported state). A field 3 value
+    // is always present but is not a door-closed boolean and not battery —
+    // investigation showed it's consistent with a device uptime counter
+    // (milliseconds since boot). There is no battery field in this message;
+    // the lock's BLE protocol does not expose battery locally at all (see
+    // README). Door status and battery are intentionally not decoded/published.
     uint8_t desired = 0, reported = 0;
-    bool door = false;
-    int battery = 0;
-    decode_confirm(dec, rx_len, &desired, &reported, &door, &battery);
-    
+    bool unused_field3_bool = false;
+    int unused_battery = 0;
+    decode_confirm(dec, rx_len, &desired, &reported, &unused_field3_bool, &unused_battery);
+
     uint8_t state_to_publish = reported;
     if (desired != 0 && desired != reported) {
       ESP_LOGD(TAG, "Status mismatch - publishing desired state");
       state_to_publish = desired;
     }
-    
+
     pending_state_ = 0;
     status_pending_retry_ = false;
     this->publish_lock_state_((LockState) state_to_publish);
-    this->publish_door_status_(door);
-    if (battery > 0 && battery <= 100 && battery_level_sensor_ != nullptr)
-      battery_level_sensor_->publish_state(battery);
   } else {
     ESP_LOGW(TAG, "decode_message failed!");
   }

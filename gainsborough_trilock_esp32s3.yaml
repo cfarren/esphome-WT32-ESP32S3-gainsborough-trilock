@@ -1,5 +1,8 @@
 # ESPHome config for the Gainsborough Freestyle Trilock BLE bridge, ESP32-S3.
-# No cloud/Cognito calls at all — pure local BLE lock/unlock/status/battery/door.
+# No cloud/Cognito calls at all — pure local BLE lock/unlock/status.
+# Battery percentage is not available locally; the lock's BLE protocol never
+# exposes it (confirmed by investigation), so battery is read from the lock's
+# own physical indicator instead of a Home Assistant entity.
 # Swap `esp32.board` below for your exact ESP32-S3 Mini variant if needed.
 
 substitutions:
@@ -75,6 +78,11 @@ esp32_ble_tracker:
     interval: 120ms
     window: 60ms
     active: false
+  on_ble_advertise:
+    - mac_address: !secret trilock_ble_mac
+      then:
+        - lambda: |-
+            id(trilock_rssi).publish_state(x.get_rssi());
 
 ble_client:
   - mac_address: !secret trilock_ble_mac
@@ -83,9 +91,15 @@ ble_client:
     on_connect:
       then:
         - logger.log: "Trilock BLE connected"
+        - text_sensor.template.publish:
+            id: last_connected
+            state: !lambda 'return id(ha_time).now().strftime("%Y-%m-%d %H:%M:%S");'
     on_disconnect:
       then:
         - logger.log: "Trilock BLE disconnected"
+
+debug:
+  update_interval: 60s
 
 # --- Lock entity: fully local BLE, no cloud connectivity of any kind ---
 lock:
@@ -101,12 +115,9 @@ lock:
       id: lock_status_text
       name: "${friendly_name} Detailed Status"
       icon: mdi:lock-check
-    battery_level:
-      name: "${friendly_name} Battery Level"
-      id: battery_level
-    battery_low:
-      name: "${friendly_name} Battery Low"
-      id: battery_low
+    # Battery level/low entities removed: the local BLE protocol never actually
+    # carries battery data (confirmed by investigation — see README). Rely on
+    # the lock's own physical low-battery indicator (beep/LED) instead.
 
 # --- Runtime-editable override -----------------------------------------------
 # Backed by flash (restore_value: true): once you change it from Home Assistant,
@@ -177,10 +188,26 @@ sensor:
     update_interval: 60s
     entity_category: diagnostic
 
-  - platform: uptime
-    name: "${friendly_name} Uptime"
-    update_interval: 60s
+  - platform: template
+    name: "${friendly_name} BLE Signal"
+    id: trilock_rssi
+    unit_of_measurement: "dBm"
+    device_class: signal_strength
+    state_class: measurement
+    accuracy_decimals: 0
     entity_category: diagnostic
+    # Populated from advertisement scanning (esp32_ble_tracker.on_ble_advertise)
+    # rather than the ble_client RSSI platform, since this device only holds
+    # a GATT connection open for well under a second per transaction — a
+    # connection-based RSSI read would show Unknown most of the time.
+
+  - platform: debug
+    free:
+      name: "${friendly_name} Heap Free"
+      entity_category: diagnostic
+    loop_time:
+      name: "${friendly_name} Loop Time"
+      entity_category: diagnostic
 
 text_sensor:
   - platform: version
@@ -197,6 +224,12 @@ text_sensor:
       name: "${friendly_name} WiFi SSID"
       entity_category: diagnostic
       disabled_by_default: true
+
+  - platform: template
+    name: "${friendly_name} Last Connected"
+    id: last_connected
+    icon: mdi:clock-check-outline
+    entity_category: diagnostic
 
 time:
   - platform: homeassistant

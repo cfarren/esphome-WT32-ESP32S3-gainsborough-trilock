@@ -15,13 +15,13 @@ This project is based on the reverse-engineering work done by mcchas:
 ## Files
 
 - `gainsborough_trilock_esp32s3.yaml`: ESPHome configuration for ESP32-S3.
-- `gainsborough_trilock/gainsborough_trilock/`: custom ESPHome component.
-- `secrets_template.yaml`: example secrets file. Copy this to `secrets.yaml`.
-
-The `tools/freestyle-gwasm-status.js` helper and `tools/freestyle-app-config.json`
-are no longer needed and can be deleted — they existed only to pull Cognito
-refresh tokens and property/BLE-MAC values out of the Freestyle cloud account,
-which this project no longer talks to at all.
+- `gainsborough_trilock/`: custom ESPHome component (`gainsborough_trilock.h`/`.cpp`).
+- `secrets_local_test_template.yaml`: example secrets file. Copy this to `secrets.yaml`.
+- `freestyle-get-lock-key.js`: one-time helper that logs into your Freestyle
+  cloud account and prints `trilock_aes_key` + `trilock_ble_mac` for
+  `secrets.yaml`. This is the *only* thing this project still talks to the
+  cloud for — getting the key out once, before the firmware ever runs. The
+  firmware itself never calls it and has no cloud dependency at runtime.
 
 ## Setup
 
@@ -58,34 +58,62 @@ see "Runtime-Editable Settings" below.
 
 ## How It Works
 
-The lock exposes two useful BLE channels:
+The lock exposes two BLE channels:
 
-- **Command channel**: the normal encrypted lock/status protocol.
+- **Command channel**: the encrypted lock/status protocol. This is the only
+  channel this project actually uses.
 - **Sync channel**: the DoAi/DiAo transport the official phone app used to
-  coordinate with Gainsborough's cloud. This component no longer uses it for
-  that purpose (see below).
+  relay telemetry to Gainsborough's cloud. Not used by this project at all —
+  see "Battery Percentage Is Not Available" below for why.
 
 The ESPHome component uses the command channel for everything: locking,
 unlocking, and status reporting. The lock's own status reply (decrypted
-locally with your AES key) includes lock state, door-closed status, and
-battery percentage — no cloud round-trip involved anywhere in that path.
+locally with your AES key) only ever contains the lock's current and desired
+state — nothing else. No cloud round-trip is involved anywhere in this path.
 
 ### Periodic Refresh
 
-Every minute, when BLE is connected and no other command is active, the
-component sends a status request over the command channel. The decoded
-response updates the lock state, door sensor, and battery sensor in Home
-Assistant directly from the lock itself.
+Every 30 seconds, when BLE is connected and no other command is active, the
+component sends a status request over the command channel and updates the
+lock entity and the "Detailed Status" text sensor from the reply.
 
-### Sync Channel / Diagnostics (local-only, optional)
+### Battery Percentage Is Not Available
 
-The lower-level Sync-channel machinery (DoAi/DiAo transfer, phone-like
-bootstrap, manual nonce injection) is still present in the component for BLE
-protocol debugging, but it is fully local now — it never reaches out to any
-Gainsborough server. The two functions that previously uploaded data to the
-cloud (`sync_cloud_refresh`, `sync_upload_last_doai_payload`) are no-ops that
-just log a warning if called; nothing in this component makes an outbound
-HTTP/TLS request of any kind.
+This was investigated thoroughly and ruled out — not a missing feature, a
+genuine limitation of the lock's local BLE protocol:
+
+- The raw BLE advertisement only broadcasts static identity data; it was
+  captured repeatedly over several minutes, including across lock/unlock
+  cycles, and never changed.
+- The lock has no standard Bluetooth Battery Service (confirmed by browsing
+  its full GATT table) — only its one proprietary service/characteristic.
+- The command channel's status reply has exactly two real fields: desired
+  state and reported state. No battery or door field exists in that message.
+- The Sync channel does queue encrypted messages that likely carry battery
+  telemetry, but decrypting them requires the exact AES-GCM nonce the lock
+  used when it originally encrypted that message — a value that only ever
+  existed inside a past cloud-authenticated session and is never transmitted
+  over BLE. This was confirmed experimentally: supplying an arbitrary
+  self-chosen nonce causes the lock to transfer the message successfully,
+  but decryption fails every time, since the ciphertext was sealed long
+  before the request was ever made.
+
+Short version: Gainsborough's official app doesn't show battery either,
+because it has no local way to read it — the cloud is the only place this
+value is actually computed/stored. Getting it back would mean reintroducing
+real cloud authentication (AWS Cognito), which defeats the point of this
+project. Rely on the lock's own physical low-battery indicator (beep/LED)
+instead, or add a manual `input_boolean` helper in Home Assistant plus a
+periodic reminder automation to check it.
+
+## Diagnostic Sensors
+
+Besides the lock entity and status text, the yaml exposes a handful of
+diagnostic sensors: WiFi signal, BLE signal strength to the lock (from
+passive advertisement scanning, since the BLE connection itself is only held
+open for well under a second per transaction), ESP32 heap/loop-time health,
+and a "Last Connected" timestamp. These are all standard ESPHome platforms
+and need no cloud or custom protocol knowledge.
 
 ## Runtime-Editable Settings
 
