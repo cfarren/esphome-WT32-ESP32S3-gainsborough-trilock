@@ -29,10 +29,10 @@ on:
           run: |
             cat > secrets.yml << EOF
             trilock_aes_key: "${{ secrets.TRILOCK_AES_KEY }}"
-            trilock_ble_mac: "${{ secrets.TRILOCK_BLE_MAC }}"
+            trilock_ble_mac: "${{ vars.TRILOCK_BLE_MAC }}"
             api_encryption_key: "${{ secrets.API_ENCRYPTION_KEY }}"
             ota_password: "${{ secrets.OTA_PASSWORD }}"
-            wifi_ssid: "${{ secrets.WIFI_SSID }}"
+            wifi_ssid: "${{ vars.WIFI_SSID }}"
             wifi_password: "${{ secrets.WIFI_PASSWORD }}"
             EOF
 
