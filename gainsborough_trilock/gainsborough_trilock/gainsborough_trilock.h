@@ -10,6 +10,7 @@
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/core/component.h"
+#include "esphome/core/preferences.h"
 #include <string>
 
 namespace esphome {
@@ -67,7 +68,17 @@ class GainsboroughTrilockLock : public lock::Lock,
   void set_door_status_binary_sensor(binary_sensor::BinarySensor *sensor) { door_status_binary_sensor_ = sensor; }
   void set_target_state(uint8_t state);
 
+  // Battery-estimate-by-cycle-count: the lock's BLE protocol has no battery
+  // telemetry at all (see README). As a practical substitute, this counts
+  // every genuine lock/unlock state transition (persisted in flash, survives
+  // reboots/OTA) so Home Assistant can estimate remaining battery life
+  // against the manufacturer's quoted cycle life. Reset this after replacing
+  // batteries.
+  uint32_t get_cycle_count() const { return cycle_count_; }
+  void reset_cycle_count();
+
  protected:
+  void increment_cycle_count_();
   void on_connected_();
   void on_disconnected_();
   void publish_lock_state_(LockState state);
@@ -123,6 +134,11 @@ class GainsboroughTrilockLock : public lock::Lock,
   uint8_t aes_key_[32]{};
   bool has_key_{false};
   bool sync_debug_{false};
+
+  // Battery-estimate-by-cycle-count (see get_cycle_count()/reset_cycle_count() above).
+  uint32_t cycle_count_{0};
+  LockState last_cycle_state_{STATE_UNKNOWN};
+  ESPPreferenceObject cycle_count_pref_;
 
   bool gatt_ready_{false};
   bool searching_{false};

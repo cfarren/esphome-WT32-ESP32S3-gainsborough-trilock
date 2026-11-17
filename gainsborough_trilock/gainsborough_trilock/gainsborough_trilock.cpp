@@ -420,6 +420,16 @@ void GainsboroughTrilockLock::setup() {
   this->traits.add_supported_state(lock::LOCK_STATE_JAMMED);
   this->traits.add_supported_state(lock::LOCK_STATE_LOCKING);
   this->traits.add_supported_state(lock::LOCK_STATE_UNLOCKING);
+
+  // Battery-estimate-by-cycle-count: restore the persisted cycle count from
+  // flash (survives reboots/OTA). get_object_id_hash() keeps this namespaced
+  // to this specific entity so it won't collide with any other component's
+  // stored preference.
+  this->cycle_count_pref_ = global_preferences->make_preference<uint32_t>(this->get_object_id_hash() ^ 0x62617474);
+  if (!this->cycle_count_pref_.load(&this->cycle_count_)) {
+    this->cycle_count_ = 0;
+  }
+  ESP_LOGI(TAG, "Restored lock cycle count: %u", this->cycle_count_);
 }
 
 void GainsboroughTrilockLock::loop() {
@@ -696,6 +706,18 @@ void GainsboroughTrilockLock::on_disconnected_() {
 }
 
 void GainsboroughTrilockLock::publish_lock_state_(LockState state) {
+  // Battery-estimate-by-cycle-count: count a "cycle" as any genuine
+  // transition between real lock/unlock states (ignoring the very first
+  // reading after boot, since there's no prior state to compare against,
+  // and ignoring error states, since those aren't a deliberate action).
+  bool is_real_state = (state == STATE_UNLOCKED || state == STATE_LOCKED_PRIVACY || state == STATE_LOCKED_DEADLOCK);
+  if (is_real_state) {
+    if (this->last_cycle_state_ != STATE_UNKNOWN && state != this->last_cycle_state_) {
+      this->increment_cycle_count_();
+    }
+    this->last_cycle_state_ = state;
+  }
+
   if (lock_status_sensor_ != nullptr) {
     switch (state) {
       case STATE_UNLOCKED:
@@ -732,6 +754,18 @@ void GainsboroughTrilockLock::publish_lock_state_(LockState state) {
     default:
       break;
   }
+}
+
+void GainsboroughTrilockLock::increment_cycle_count_() {
+  this->cycle_count_++;
+  this->cycle_count_pref_.save(&this->cycle_count_);
+  ESP_LOGI(TAG, "Lock cycle count incremented to %u", this->cycle_count_);
+}
+
+void GainsboroughTrilockLock::reset_cycle_count() {
+  this->cycle_count_ = 0;
+  this->cycle_count_pref_.save(&this->cycle_count_);
+  ESP_LOGW(TAG, "Lock cycle count reset to 0 (battery replaced?)");
 }
 
 void GainsboroughTrilockLock::publish_battery_info_(bool low, int pct) {

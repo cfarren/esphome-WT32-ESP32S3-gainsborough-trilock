@@ -124,6 +124,20 @@ lock:
 # the new value survives reboots and OTA updates with no recompile or reflash
 # needed. initial_value only matters on the very first boot, to seed the field
 # from secrets.yaml so it works immediately after flashing.
+number:
+  - platform: template
+    name: "${friendly_name} - Battery Life Cycle Estimate"
+    id: battery_cycle_life
+    icon: mdi:counter
+    entity_category: config
+    min_value: 3650    # 10/day * 365 days (manufacturer's low-end estimate)
+    max_value: 7300    # 20/day * 365 days (manufacturer's high-end estimate)
+    step: 50
+    initial_value: 5475  # 15/day * 365 days (midpoint)
+    restore_value: true
+    optimistic: true
+    unit_of_measurement: "cycles"
+
 text:
   - platform: template
     name: "${friendly_name} - AES Key Override"
@@ -173,6 +187,16 @@ button:
     icon: mdi:restart
     entity_category: diagnostic
 
+  - platform: template
+    name: "${friendly_name} - Reset Battery Cycle Count"
+    id: btn_reset_cycle_count
+    icon: mdi:counter
+    entity_category: config
+    on_press:
+      then:
+        - lambda: |-
+            id(trilock).reset_cycle_count();
+
 binary_sensor:
   - platform: template
     name: "${friendly_name} BLE Connected"
@@ -208,6 +232,37 @@ sensor:
     loop_time:
       name: "${friendly_name} Loop Time"
       entity_category: diagnostic
+
+  # Battery estimate by lock/unlock cycle count — a substitute for the real
+  # battery telemetry that doesn't exist locally (see README). Not a real
+  # measurement: it's a rough estimate against the manufacturer's quoted
+  # cycle life, configurable via the "Battery Life Cycle Estimate" number
+  # entity above. Reset after replacing batteries with the button below.
+  - platform: template
+    name: "${friendly_name} Cycle Count"
+    id: lock_cycle_count
+    icon: mdi:counter
+    state_class: total_increasing
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: |-
+      return (float) id(trilock).get_cycle_count();
+
+  - platform: template
+    name: "${friendly_name} Battery Estimate"
+    id: battery_estimate
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: 60s
+    lambda: |-
+      float life = id(battery_cycle_life).state;
+      if (life <= 0) return 0.0f;
+      float pct = 100.0f - ((float) id(trilock).get_cycle_count() / life * 100.0f);
+      if (pct < 0) pct = 0;
+      if (pct > 100) pct = 100;
+      return pct;
 
 text_sensor:
   - platform: version
